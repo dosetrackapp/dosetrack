@@ -3,6 +3,16 @@ import './App.css'
 import { builtinSubstanceDefinitions } from './substancesCatalog'
 import Analytics, { type HistoryJump } from './Analytics'
 import { useDialogs } from './Dialogs'
+import {
+  buildBackupJson,
+  buildReadableText,
+  copyText,
+  deliverFile,
+  fileStamp,
+  mergeBackup,
+  parseBackup,
+  type StoredShape,
+} from './backup'
 
 type Substance = {
   id: string
@@ -217,7 +227,7 @@ function suggestedChoices(substanceId: string, lastChoices: Record<string, LastC
   }
 }
 
-function loadStoredData(): {
+function loadStoredData(source?: any): {
   substances: Substance[]
   entries: Entry[]
   customRoutes: string[]
@@ -232,7 +242,7 @@ function loadStoredData(): {
   let saved: string | null = null
   try {
     saved = localStorage.getItem(STORAGE_KEY)
-    const parsed = saved ? JSON.parse(saved) : null
+    const parsed = source !== undefined ? source : saved ? JSON.parse(saved) : null
     const storedSubstances = Array.isArray(parsed?.substances) ? parsed.substances : []
 
     const idRemap: Record<string, string> = {}
@@ -448,6 +458,44 @@ function formatQuantity(value: number) {
   }).format(value)
 }
 
+type HistoryTool = 'import' | 'export' | 'clear'
+
+const iconProps = { viewBox: '0 0 24 24', 'aria-hidden': true, focusable: false } as const
+
+// Дискета: сохранить резервную копию
+function IconSave() {
+  return (
+    <svg {...iconProps}>
+      <path d="M5 3h11l3 3v15H5z" />
+      <path d="M8 3v5h7V3" />
+      <rect x="8" y="13" width="8" height="8" />
+    </svg>
+  )
+}
+
+// Стрелка в лоток: загрузить данные из копии
+function IconLoad() {
+  return (
+    <svg {...iconProps}>
+      <path d="M12 3v11" />
+      <path d="M8 10l4 4 4-4" />
+      <path d="M4 15v5h16v-5" />
+    </svg>
+  )
+}
+
+// Корзина: удалить всю историю
+function IconTrash() {
+  return (
+    <svg {...iconProps}>
+      <path d="M4 7h16" />
+      <path d="M9 7V4h6v3" />
+      <path d="M6 7l1 13h10l1-13" />
+      <path d="M10 11v6M14 11v6" />
+    </svg>
+  )
+}
+
 function App() {
   // Собственные диалоги вместо alert / confirm / prompt (в Telegram WebView они ненадёжны).
   const { alert: showAlert, confirm: showConfirm, prompt: showPrompt } = useDialogs()
@@ -465,6 +513,10 @@ function App() {
   const [deletedCustomUnits, setDeletedCustomUnits] = useState<string[]>(initialData.deletedCustomUnits)
 
   const [tab, setTab] = useState<Tab>('record')
+  const [backupStatus, setBackupStatus] = useState('')
+  const [historyTool, setHistoryTool] = useState<HistoryTool | null>(null)
+  const [importText, setImportText] = useState('')
+  const backupFileRef = useRef<HTMLInputElement>(null)
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null)
 
   // Фильтры журнала — не влияют на сохранённые записи.
@@ -1063,6 +1115,132 @@ function App() {
     setTab('history')
   }
 
+  // ── Резервная копия ──────────────────────────────────────────────
+  function currentStored(): StoredShape {
+    return {
+      substances,
+      entries,
+      customRoutes,
+      customForms,
+      customUnits,
+      lastChoices,
+      lastUnitChoices,
+      deletedCustomRoutes,
+      deletedCustomForms,
+      deletedCustomUnits,
+    }
+  }
+
+  async function exportData(kind: 'json' | 'text', how: 'file' | 'copy') {
+    const data = currentStored()
+    const content = kind === 'json' ? buildBackupJson(data) : buildReadableText(data)
+
+    if (how === 'copy') {
+      const ok = await copyText(content)
+      setBackupStatus(ok
+        ? 'Скопировано. Вставь текст в заметки или в любое место, где он сохранится.'
+        : 'Не удалось скопировать. Попробуй «Сохранить файл».')
+      return
+    }
+
+    const name = kind === 'json'
+      ? `dosetrack-backup-${fileStamp()}.json`
+      : `dosetrack-journal-${fileStamp()}.txt`
+    const result = await deliverFile(name, kind === 'json' ? 'application/json' : 'text/plain', content)
+
+    if (result === 'shared') setBackupStatus('Готово. Выбери, куда сохранить файл.')
+    else if (result === 'downloaded') setBackupStatus('Файл отправлен на скачивание. Если он не появился, нажми «Скопировать» и сохрани текст вручную.')
+    else if (result === 'cancelled') setBackupStatus('Сохранение отменено.')
+    else setBackupStatus('Не удалось создать файл. Попробуй «Скопировать».')
+  }
+
+  async function importFromText(text: string) {
+    const parsed = parseBackup(text)
+    if (!parsed.ok) {
+      await showAlert(parsed.error)
+      return
+    }
+
+    const result = mergeBackup(currentStored(), parsed.data)
+    if (result.addedEntries === 0 && result.addedSubstances === 0) {
+      await showAlert(`Все записи из копии (${result.totalInFile}) уже есть в журнале. Ничего не добавлено.`)
+      return
+    }
+
+    const substanceNote = result.addedSubstances > 0
+      ? ` Будет добавлено пользовательских веществ: ${result.addedSubstances}.`
+      : ''
+    const ok = await showConfirm(
+      `В копии записей: ${result.totalInFile}. Новых для этого журнала: ${result.addedEntries}, уже есть: ${result.skippedEntries}.${substanceNote} Текущие записи не изменятся и не удалятся. Добавить?`,
+    )
+    if (!ok) return
+
+    // Страховка: перед восстановлением сохраняем копию текущих данных.
+    try {
+      const before = localStorage.getItem(STORAGE_KEY)
+      if (before) localStorage.setItem(`${STORAGE_KEY}-before-import`, before)
+    } catch {
+      // Если места нет, продолжаем: восстановление только добавляет данные.
+    }
+
+    const next = loadStoredData(result.merged)
+    // Проверка: после слияния записей должно быть ровно столько, сколько ожидалось.
+    if (next.entries.length !== entries.length + result.addedEntries) {
+      await showAlert('Не удалось безопасно восстановить данные. Журнал не изменён.')
+      return
+    }
+
+    setSubstances(next.substances)
+    setEntries(next.entries)
+    setCustomRoutes(next.customRoutes)
+    setCustomForms(next.customForms)
+    setCustomUnits(next.customUnits)
+    setLastChoices(next.lastChoices)
+    setLastUnitChoices(next.lastUnitChoices)
+    setDeletedCustomRoutes(next.deletedCustomRoutes)
+    setDeletedCustomForms(next.deletedCustomForms)
+    setDeletedCustomUnits(next.deletedCustomUnits)
+    setImportText('')
+    setBackupStatus('')
+    setHistoryTool(null)
+    await showAlert(`Готово. Добавлено записей: ${result.addedEntries}.`)
+  }
+
+  function openHistoryTool(tool: HistoryTool) {
+    setBackupStatus('')
+    setHistoryTool(tool)
+  }
+
+  function clearAllHistory() {
+    setEntries([])
+    if (editingEntryId) resetForm()
+    // Страховочная копия, созданная при загрузке, тоже содержит историю — удаляем и её.
+    try {
+      localStorage.removeItem(`${STORAGE_KEY}-before-import`)
+    } catch {
+      // Недоступное хранилище не должно мешать удалению.
+    }
+    setHistoryTool(null)
+  }
+
+  async function importFromFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    if (file.size > 25 * 1024 * 1024) {
+      await showAlert('Файл слишком большой для резервной копии DoseTrack.')
+      return
+    }
+    let text: string
+    try {
+      text = await file.text()
+    } catch {
+      await showAlert('Не удалось прочитать файл.')
+      return
+    }
+    await importFromText(text)
+  }
+
   function renderRecord() {
     const isEditing = editingEntryId !== null
     const pool = selectableSubstances()
@@ -1590,10 +1768,23 @@ function App() {
 
     return (
       <>
-        <div className="page-heading">
-          <div className="eyebrow">ЖУРНАЛ СОБЫТИЙ</div>
-          <h1>История</h1>
-          <p>Все внесённые события в хронологическом порядке.</p>
+        <div className="page-heading page-heading-actions">
+          <div className="page-heading-text">
+            <div className="eyebrow">ЖУРНАЛ СОБЫТИЙ</div>
+            <h1>История</h1>
+            <p>Все внесённые события в хронологическом порядке.</p>
+          </div>
+          <div className="history-tools">
+            <button type="button" className="tool-button" title="Загрузка из резервной копии" aria-label="Загрузка из резервной копии" onClick={() => openHistoryTool('import')}>
+              <IconLoad />
+            </button>
+            <button type="button" className="tool-button" title="Резервное копирование" aria-label="Резервное копирование" onClick={() => openHistoryTool('export')}>
+              <IconSave />
+            </button>
+            <button type="button" className="tool-button tool-button-danger" title="Удалить всю историю" aria-label="Удалить всю историю" onClick={() => openHistoryTool('clear')}>
+              <IconTrash />
+            </button>
+          </div>
         </div>
 
         <section className="panel">
@@ -1888,7 +2079,131 @@ function App() {
         <p className="hint">
           Удаление истории не удаляет само вещество. Полное удаление доступно только для веществ, добавленных пользователем; вместе с ними удаляются связанные записи.
         </p>
+
       </>
+    )
+  }
+
+  function renderHistoryTool() {
+    if (!historyTool) return null
+    const close = () => setHistoryTool(null)
+
+    return (
+      <div
+        className="dialog-backdrop tool-modal"
+        onClick={event => {
+          if (event.target === event.currentTarget) close()
+        }}
+      >
+        <div className="dialog tool-dialog" role="dialog" aria-modal="true">
+          {historyTool === 'export' && (
+            <>
+              <h2>Резервное копирование</h2>
+              <p className="tool-choice">Вы выбрали: сохранить копию всех данных.</p>
+              <p className="muted small">
+                Записей в журнале: {entries.length}. В копию входят все записи (в том числе архивных веществ)
+                и твои вещества. Выбери формат:
+              </p>
+
+              <div className="backup-card">
+                <strong>Для программы</strong>
+                <p className="muted small">Полная копия (.json): из неё можно восстановить журнал.</p>
+                <div className="backup-actions">
+                  <button type="button" className="edit-button" onClick={() => exportData('json', 'file')}>Сохранить файл</button>
+                  <button type="button" className="edit-button" onClick={() => exportData('json', 'copy')}>Скопировать</button>
+                </div>
+              </div>
+              <div className="backup-card">
+                <strong>Для чтения</strong>
+                <p className="muted small">Обычный текст по дням (.txt). Загрузить его обратно нельзя.</p>
+                <div className="backup-actions">
+                  <button type="button" className="edit-button" onClick={() => exportData('text', 'file')}>Сохранить файл</button>
+                  <button type="button" className="edit-button" onClick={() => exportData('text', 'copy')}>Скопировать</button>
+                </div>
+              </div>
+
+              {backupStatus && <p className="backup-status" role="status">{backupStatus}</p>}
+              <p className="hint">
+                Файл не зашифрован и содержит все твои записи. Храни его там, где его не увидят посторонние.
+              </p>
+              <div className="dialog-actions">
+                <button type="button" className="dialog-btn" onClick={close}>Закрыть</button>
+              </div>
+            </>
+          )}
+
+          {historyTool === 'import' && (
+            <>
+              <h2>Загрузка из резервной копии</h2>
+              <p className="tool-choice">Вы выбрали: загрузить записи из копии.</p>
+              <p className="muted small">
+                Записи из копии добавятся к текущим. Существующие записи не изменятся и не удалятся,
+                повторы будут пропущены. Перед добавлением приложение покажет, сколько записей новых.
+              </p>
+
+              <input
+                ref={backupFileRef}
+                type="file"
+                accept=".json,application/json,text/plain"
+                style={{ display: 'none' }}
+                onChange={importFromFile}
+              />
+              <button type="button" className="edit-button" onClick={() => backupFileRef.current?.click()}>
+                Выбрать файл копии
+              </button>
+
+              <label htmlFor="backup-paste">Или вставь скопированный текст копии</label>
+              <textarea
+                id="backup-paste"
+                rows={3}
+                value={importText}
+                onChange={event => setImportText(event.target.value)}
+                placeholder="Вставь сюда текст резервной копии"
+              />
+              <button
+                type="button"
+                className="edit-button"
+                disabled={!importText.trim()}
+                onClick={() => importFromText(importText)}
+              >
+                Восстановить из текста
+              </button>
+
+              <div className="dialog-actions">
+                <button type="button" className="dialog-btn" onClick={close}>Закрыть</button>
+              </div>
+            </>
+          )}
+
+          {historyTool === 'clear' && (
+            <>
+              <h2>Удаление всей истории</h2>
+              <p className="tool-choice tool-choice-danger">Вы выбрали: удалить ВСЮ историю.</p>
+              {entries.length === 0 ? (
+                <>
+                  <p className="muted small">В журнале пока нет записей, удалять нечего.</p>
+                  <div className="dialog-actions">
+                    <button type="button" className="dialog-btn" onClick={close}>Закрыть</button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="dialog-message">
+                    Будут безвозвратно удалены все записи: {entries.length} (по всем веществам, включая архив).
+                    Сами вещества, твои способы, формы и единицы останутся. Отменить удаление нельзя.
+                  </p>
+                  <p className="muted small">Если записи могут понадобиться, сначала сохрани резервную копию.</p>
+                  <div className="dialog-actions tool-actions-wrap">
+                    <button type="button" className="dialog-btn" onClick={close}>Отмена</button>
+                    <button type="button" className="dialog-btn" onClick={() => openHistoryTool('export')}>Сначала сохранить копию</button>
+                    <button type="button" className="dialog-btn dialog-btn-danger" onClick={clearAllHistory}>Удалить всё</button>
+                  </div>
+                </>
+              )}
+            </>
+          )}
+        </div>
+      </div>
     )
   }
 
@@ -1965,6 +2280,8 @@ function App() {
           <span>◈</span>Вещества
         </button>
       </nav>
+
+      {renderHistoryTool()}
     </div>
   )
 }

@@ -740,7 +740,7 @@ function Fold({ title, hint, children }: { title: string; hint?: string; childre
 
 export default function Analytics({ substances, entries, onEditEntry, onOpenHistory }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [period, setPeriod] = useState<Period>(30)
+  const [period, setPeriod] = useState<Period>(7)
   const [month, setMonth] = useState(() => {
     const now = new Date()
     return new Date(now.getFullYear(), now.getMonth(), 1)
@@ -762,7 +762,10 @@ export default function Analytics({ substances, entries, onEditEntry, onOpenHist
     return { count, last }
   }, [entries])
 
-  const withData = substances.filter(item => (totals.count.get(item.id) ?? 0) > 0)
+  // Сверху — вещество с самой свежей записью, снизу — с самой давней.
+  const withData = substances
+    .filter(item => (totals.count.get(item.id) ?? 0) > 0)
+    .sort((a, b) => (totals.last.get(b.id) ?? 0) - (totals.last.get(a.id) ?? 0))
   let defaultId = ''
   let defaultTime = -Infinity
   withData.forEach(item => {
@@ -834,19 +837,6 @@ export default function Analytics({ substances, entries, onEditEntry, onOpenHist
   }
 
   const { current, previous, buckets, weekly, heat, totalDays } = view
-
-  // ── выбор вещества: число событий в выбранном периоде
-  const chipCounts = new Map<string, number>()
-  withData.forEach(item => chipCounts.set(item.id, 0))
-  const chipFrom = period > 0 ? shiftKey(todayKey, -(period - 1)) : ''
-  entries.forEach(entry => {
-    if (!chipCounts.has(entry.substanceId)) return
-    if (period > 0) {
-      const key = dayKeyOf(new Date(entry.takenAt))
-      if (key < chipFrom || key > todayKey) return
-    }
-    chipCounts.set(entry.substanceId, (chipCounts.get(entry.substanceId) ?? 0) + 1)
-  })
 
   // ── единицы
   const unitList = [...current.units.values()]
@@ -1003,18 +993,17 @@ export default function Analytics({ substances, entries, onEditEntry, onOpenHist
     <div className={`analytics${sheetOpen ? ' sheet-open' : ''}`}>
       <section className="panel analytics-controls">
         <div className="control-label">ВЕЩЕСТВО</div>
-        <div className="chip-row" role="tablist" aria-label="Вещество">
+        <div className="substance-list" role="tablist" aria-label="Вещество">
           {withData.map(item => (
             <button
               type="button"
               role="tab"
               aria-selected={item.id === activeId}
               key={item.id}
-              className={`chip${item.id === activeId ? ' active' : ''}`}
+              className={`substance-item${item.id === activeId ? ' active' : ''}`}
               onClick={() => setSelectedId(item.id)}
             >
-              {item.name}
-              <small>{chipCounts.get(item.id) ?? 0}</small>
+              <span>{item.name}</span>
             </button>
           ))}
         </div>
