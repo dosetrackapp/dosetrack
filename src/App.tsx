@@ -2,7 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import { builtinSubstanceDefinitions } from './substancesCatalog'
 import Analytics, { type HistoryJump } from './Analytics'
-import { useDialogs } from './Dialogs'
+import { useDialogs } from './dialogContext'
+import SettingsScreen from './SettingsScreen'
+import FirstRunNotice from './FirstRunNotice'
+import { formatDateTime, useSettings } from './settings'
 import {
   buildBackupJson,
   buildReadableText,
@@ -11,6 +14,7 @@ import {
   fileStamp,
   mergeBackup,
   parseBackup,
+  type Raw,
   type StoredShape,
 } from './backup'
 
@@ -227,7 +231,7 @@ function suggestedChoices(substanceId: string, lastChoices: Record<string, LastC
   }
 }
 
-function loadStoredData(source?: any): {
+function loadStoredData(source?: Raw): {
   substances: Substance[]
   entries: Entry[]
   customRoutes: string[]
@@ -283,7 +287,7 @@ function loadStoredData(source?: any): {
       !builtinNames.has(normalizeSubstanceTerm(item.name)),
     )
 
-    const rawEntries: Array<Record<string, any>> = Array.isArray(parsed?.entries)
+    const rawEntries: Raw[] = Array.isArray(parsed?.entries)
       ? parsed.entries.filter((value: unknown) => value && typeof value === 'object')
       : []
     const entries: Entry[] = rawEntries.map(entry => {
@@ -373,7 +377,7 @@ function loadStoredData(source?: any): {
 
     const lastChoices: Record<string, LastChoice> = {}
     if (parsed?.lastChoices && typeof parsed.lastChoices === 'object') {
-      for (const [id, value] of Object.entries(parsed.lastChoices as Record<string, any>)) {
+      for (const [id, value] of Object.entries(parsed.lastChoices as Record<string, Raw>)) {
         if (value && typeof value === 'object') {
           const canonicalId = canonicalizeSubstanceId(id)
           const route = typeof value.route === 'string' ? value.route : ''
@@ -434,13 +438,7 @@ function toLocalDateTime(value: string) {
 }
 
 function formatDate(value: string) {
-  return new Date(value).toLocaleString('ru-RU', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
+  return formatDateTime(new Date(value))
 }
 
 function localDayKey(value: string) {
@@ -484,6 +482,17 @@ function IconLoad() {
   )
 }
 
+// Ползунки: настройки приложения
+function IconSettings() {
+  return (
+    <svg {...iconProps}>
+      <path d="M4 7h9M17 7h3M4 17h3M11 17h9" />
+      <circle cx="15" cy="7" r="2" />
+      <circle cx="9" cy="17" r="2" />
+    </svg>
+  )
+}
+
 // Корзина: удалить всю историю
 function IconTrash() {
   return (
@@ -515,6 +524,8 @@ function App() {
   const [tab, setTab] = useState<Tab>('record')
   const [backupStatus, setBackupStatus] = useState('')
   const [historyTool, setHistoryTool] = useState<HistoryTool | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  useSettings() // перерисовка при смене формата даты и времени
   const [importText, setImportText] = useState('')
   const backupFileRef = useRef<HTMLInputElement>(null)
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null)
@@ -538,7 +549,7 @@ function App() {
   const [substanceError, setSubstanceError] = useState('')
   const substanceInputRef = useRef<HTMLInputElement>(null)
   // Для какого вещества в форму подставлены значения по умолчанию (единица, способ, форма).
-  const defaultsForIdRef = useRef('')
+  const [defaultsForId, setDefaultsForId] = useState('')
   const [amount, setAmount] = useState('')
   const [unit, setUnit] = useState(() => suggestedUnit('', initialData.lastUnitChoices))
   const [showCustomUnitInput, setShowCustomUnitInput] = useState(false)
@@ -717,8 +728,8 @@ function App() {
 
     // Если пользователь стёр часть текста и снова выбрал то же вещество,
     // уже выбранные единица, способ и форма не затираются.
-    if (defaultsForIdRef.current === nextId) return
-    defaultsForIdRef.current = nextId
+    if (defaultsForId === nextId) return
+    setDefaultsForId(nextId)
     applyDefaultsFor(nextId)
   }
 
@@ -771,7 +782,7 @@ function App() {
     setSubstanceDropdownOpen(false)
     setActiveSuggestionIndex(-1)
     setSubstanceError('')
-    defaultsForIdRef.current = newSubstance.id
+    setDefaultsForId(newSubstance.id)
     applyDefaultsFor(newSubstance.id)
   }
 
@@ -792,7 +803,7 @@ function App() {
     setSubstanceDropdownOpen(false)
     setActiveSuggestionIndex(-1)
     setSubstanceError('')
-    defaultsForIdRef.current = ''
+    setDefaultsForId('')
     setAmount('')
     setUnit(suggestedUnit('', lastUnitChoices))
     setShowCustomUnitInput(false)
@@ -855,7 +866,7 @@ function App() {
       // Не переносим уже заполненную форму на другое вещество автоматически.
       setSubstanceId('')
       setSubstanceSearch('')
-      defaultsForIdRef.current = ''
+      setDefaultsForId('')
     }
 
     if (historySubstanceFilter === id) {
@@ -974,7 +985,7 @@ function App() {
     setSubstanceDropdownOpen(false)
     setActiveSuggestionIndex(-1)
     setSubstanceError('')
-    defaultsForIdRef.current = entry.substanceId
+    setDefaultsForId(entry.substanceId)
     setShowCustomUnitInput(false)
     setCustomUnitDraft('')
     setRouteExpanded(false)
@@ -1217,6 +1228,7 @@ function App() {
     // Страховочная копия, созданная при загрузке, тоже содержит историю — удаляем и её.
     try {
       localStorage.removeItem(`${STORAGE_KEY}-before-import`)
+      localStorage.removeItem(BACKUP_KEY)
     } catch {
       // Недоступное хранилище не должно мешать удалению.
     }
@@ -1729,7 +1741,7 @@ function App() {
               checked={unknown}
               onChange={event => setUnknown(event.target.checked)}
             />
-            Точное количество неизвестно
+            Количество неизвестно
           </label>
 
           <button type="submit" className="primary-button">
@@ -1768,23 +1780,10 @@ function App() {
 
     return (
       <>
-        <div className="page-heading page-heading-actions">
-          <div className="page-heading-text">
-            <div className="eyebrow">ЖУРНАЛ СОБЫТИЙ</div>
-            <h1>История</h1>
-            <p>Все внесённые события в хронологическом порядке.</p>
-          </div>
-          <div className="history-tools">
-            <button type="button" className="tool-button" title="Загрузка из резервной копии" aria-label="Загрузка из резервной копии" onClick={() => openHistoryTool('import')}>
-              <IconLoad />
-            </button>
-            <button type="button" className="tool-button" title="Резервное копирование" aria-label="Резервное копирование" onClick={() => openHistoryTool('export')}>
-              <IconSave />
-            </button>
-            <button type="button" className="tool-button tool-button-danger" title="Удалить всю историю" aria-label="Удалить всю историю" onClick={() => openHistoryTool('clear')}>
-              <IconTrash />
-            </button>
-          </div>
+        <div className="page-heading">
+          <div className="eyebrow">ЖУРНАЛ СОБЫТИЙ</div>
+          <h1>История</h1>
+          <p>Все внесённые события в хронологическом порядке.</p>
         </div>
 
         <section className="panel">
@@ -2046,6 +2045,13 @@ function App() {
 
           <div className="substance-group">
             <h3>Базовый справочник</h3>
+            <div className="catalog-note" role="note">
+              <strong>Назначение справочника</strong>
+              <p>
+                Справочник предназначен для идентификации веществ и ведения личных записей. Наличие вещества в нём
+                не означает одобрения употребления или подтверждения безопасности и законности оборота.
+              </p>
+            </div>
             {activeBuiltin.length === 0
               ? <p className="muted small">Все базовые вещества находятся в архиве.</p>
               : activeBuiltin.map(renderSubstanceRow)}
@@ -2099,7 +2105,7 @@ function App() {
           {historyTool === 'export' && (
             <>
               <h2>Резервное копирование</h2>
-              <p className="tool-choice">Вы выбрали: сохранить копию всех данных.</p>
+              <p className="tool-choice">Ты выбрал(а): сохранить копию всех данных.</p>
               <p className="muted small">
                 Записей в журнале: {entries.length}. В копию входят все записи (в том числе архивных веществ)
                 и твои вещества. Выбери формат:
@@ -2135,7 +2141,7 @@ function App() {
           {historyTool === 'import' && (
             <>
               <h2>Загрузка из резервной копии</h2>
-              <p className="tool-choice">Вы выбрали: загрузить записи из копии.</p>
+              <p className="tool-choice">Ты выбрал(а): загрузить записи из копии.</p>
               <p className="muted small">
                 Записи из копии добавятся к текущим. Существующие записи не изменятся и не удалятся,
                 повторы будут пропущены. Перед добавлением приложение покажет, сколько записей новых.
@@ -2178,7 +2184,7 @@ function App() {
           {historyTool === 'clear' && (
             <>
               <h2>Удаление всей истории</h2>
-              <p className="tool-choice tool-choice-danger">Вы выбрали: удалить ВСЮ историю.</p>
+              <p className="tool-choice tool-choice-danger">Ты выбрал(а): удалить ВСЮ историю.</p>
               {entries.length === 0 ? (
                 <>
                   <p className="muted small">В журнале пока нет записей, удалять нечего.</p>
@@ -2237,13 +2243,23 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <div>
+        <div className="topbar-brand">
           <div className="brand">Dose<span>Track</span></div>
-          <div className="brand-caption">ЛИЧНЫЙ ЖУРНАЛ</div>
+          <div className="brand-caption">ПЕРСОНАЛЬНЫЙ ЖУРНАЛ</div>
         </div>
-        <div className="local-badge">
-          <span className="status-dot" />
-          Локальный режим
+        <div className="header-tools">
+          <button type="button" className="tool-button" title="Загрузка из резервной копии" aria-label="Загрузка из резервной копии" onClick={() => openHistoryTool('import')}>
+            <IconLoad />
+          </button>
+          <button type="button" className="tool-button" title="Резервное копирование" aria-label="Резервное копирование" onClick={() => openHistoryTool('export')}>
+            <IconSave />
+          </button>
+          <button type="button" className="tool-button tool-button-danger" title="Удалить всю историю" aria-label="Удалить всю историю" onClick={() => openHistoryTool('clear')}>
+            <IconTrash />
+          </button>
+          <button type="button" className="tool-button" title="Настройки" aria-label="Настройки" onClick={() => setSettingsOpen(true)}>
+            <IconSettings />
+          </button>
         </div>
       </header>
 
@@ -2282,6 +2298,8 @@ function App() {
       </nav>
 
       {renderHistoryTool()}
+      {settingsOpen && <SettingsScreen onClose={() => setSettingsOpen(false)} />}
+      <FirstRunNotice />
     </div>
   )
 }

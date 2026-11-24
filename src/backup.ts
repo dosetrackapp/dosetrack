@@ -1,3 +1,5 @@
+import { formatDateLong, formatDateTime, formatTime } from './settings'
+
 // Резервная копия DoseTrack: выгрузка и восстановление данных.
 // Всё происходит на устройстве: файл создаётся в браузере и никуда не отправляется.
 
@@ -79,9 +81,7 @@ export function buildReadableText(data: StoredShape): string {
     (a, b) => new Date(b.takenAt).getTime() - new Date(a.takenAt).getTime(),
   )
 
-  const exported = new Date().toLocaleString('ru-RU', {
-    day: '2-digit', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit',
-  })
+  const exported = formatDateTime(new Date())
 
   const lines: string[] = [
     'DoseTrack — журнал событий',
@@ -100,9 +100,7 @@ export function buildReadableText(data: StoredShape): string {
       currentDay = key
       lines.push(
         '',
-        date.toLocaleDateString('ru-RU', {
-          weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
-        }),
+        formatDateLong(date),
         '—'.repeat(24),
       )
     }
@@ -119,7 +117,7 @@ export function buildReadableText(data: StoredShape): string {
     }
 
     const details = [quantity, entry.route, entry.form].filter(Boolean).join(' · ')
-    lines.push(`${pad(date.getHours())}:${pad(date.getMinutes())}  ${name}${archived} — ${details}`)
+    lines.push(`${formatTime(date)}  ${name}${archived} — ${details}`)
     if (entry.comment) lines.push(`       Комментарий: ${entry.comment.replace(/\s*\n\s*/g, ' ')}`)
   }
 
@@ -199,7 +197,10 @@ export async function copyText(text: string): Promise<boolean> {
 
 // ───────────────────────── Восстановление ─────────────────────────
 
-type Raw = Record<string, any>
+// Данные из файла и из localStorage приходят как произвольный JSON и проверяются поле за полем,
+// поэтому здесь сознательно используется «свободный» тип.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type Raw = Record<string, any>
 
 export type ParseResult =
   | { ok: true; data: Raw }

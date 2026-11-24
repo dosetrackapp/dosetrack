@@ -1,13 +1,12 @@
 import {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useMemo,
   useRef,
   useState,
   type ReactNode,
 } from 'react'
+import { DialogContext, type DialogApi } from './dialogContext'
 
 // Собственные диалоги приложения. Заменяют window.alert / confirm / prompt,
 // которые в WebView Telegram работают нестабильно. Не зависят от Telegram.
@@ -16,28 +15,6 @@ type DialogRequest =
   | { kind: 'alert'; message: string; resolve: () => void }
   | { kind: 'confirm'; message: string; resolve: (value: boolean) => void }
   | { kind: 'prompt'; message: string; defaultValue: string; resolve: (value: string | null) => void }
-
-type DialogApi = {
-  alert: (message: string) => Promise<void>
-  confirm: (message: string) => Promise<boolean>
-  prompt: (message: string, defaultValue?: string) => Promise<string | null>
-}
-
-// Запасной вариант, если провайдер по какой-то причине не подключён.
-const fallbackApi: DialogApi = {
-  alert: message => {
-    window.alert(message)
-    return Promise.resolve()
-  },
-  confirm: message => Promise.resolve(window.confirm(message)),
-  prompt: (message, defaultValue = '') => Promise.resolve(window.prompt(message, defaultValue)),
-}
-
-const DialogContext = createContext<DialogApi>(fallbackApi)
-
-export function useDialogs(): DialogApi {
-  return useContext(DialogContext)
-}
 
 export function DialogProvider({ children }: { children: ReactNode }) {
   const [queue, setQueue] = useState<DialogRequest[]>([])

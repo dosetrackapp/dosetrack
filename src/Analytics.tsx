@@ -7,6 +7,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from 'react'
+import { formatDateAxis, formatDateLong, formatDateShort, formatTime } from './settings'
 
 // ─────────────────────────────────────────────────────────────
 // Типы (структурно совместимы с Entry из App.tsx)
@@ -103,28 +104,19 @@ function mondayKey(key: string) {
 }
 
 function dayShort(key: string, withYear = false) {
-  return keyToDate(key).toLocaleDateString('ru-RU', {
-    day: 'numeric',
-    month: 'short',
-    ...(withYear ? { year: 'numeric' } : {}),
-  })
+  return formatDateShort(keyToDate(key), withYear)
 }
 
 function dayLong(key: string) {
-  return keyToDate(key).toLocaleDateString('ru-RU', {
-    weekday: 'short',
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-  })
+  return formatDateLong(keyToDate(key))
 }
 
 function dayAxis(key: string) {
-  return keyToDate(key).toLocaleDateString('ru-RU', { day: 'numeric', month: 'numeric' })
+  return formatDateAxis(keyToDate(key))
 }
 
 function timeOf(row: Row) {
-  return new Date(row.time).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
+  return formatTime(new Date(row.time))
 }
 
 function rangeLabel(from: string, to: string) {
@@ -778,10 +770,14 @@ export default function Analytics({ substances, entries, onEditEntry, onOpenHist
   const activeId = withData.some(item => item.id === selectedId) ? (selectedId as string) : defaultId
   const substance = withData.find(item => item.id === activeId)
 
+  // Правило относится к React Compiler, который в проекте не подключён: он не может доказать, что записи
+  // дальше не изменяются. На работу кода это не влияет, поэтому правило здесь отключено.
+  /* eslint-disable react-hooks/preserve-manual-memoization */
   const rows = useMemo(
     () => entries.filter(entry => entry.substanceId === activeId).map(toRow).sort((a, b) => a.time - b.time),
     [entries, activeId],
   )
+  /* eslint-enable react-hooks/preserve-manual-memoization */
 
   const view = useMemo(() => {
     let from: string
@@ -1191,25 +1187,24 @@ export default function Analytics({ substances, entries, onEditEntry, onOpenHist
           ) : (
             <div className="heat-grid">
               <div />
-              {BLOCK_LABELS.map(label => <div className="heat-head" key={label}>{label}</div>)}
+              {WEEKDAYS.map(name => <div className="heat-head" key={name}>{name}</div>)}
               <div className="heat-head">Σ</div>
-              {WEEKDAYS.map((name, wd) => (
-                <Fragment key={name}>
-                  <div className="heat-row-label">{name}</div>
-                  {BLOCK_LABELS.map((label, block) => {
+              {BLOCK_LABELS.map((label, block) => (
+                <Fragment key={label}>
+                  <div className="heat-row-label">{label}</div>
+                  {WEEKDAYS.map((name, wd) => {
                     const count = heat[wd][block]
                     const isSelected = selectedCell?.wd === wd && selectedCell.block === block
                     return (
                       <button
                         type="button"
-                        key={label}
+                        key={name}
                         className={[
                           'heat-cell',
                           count > 0 ? `has-count level-${levelOf(count, heatMax)}` : '',
                           isSelected ? 'selected' : '',
                         ].filter(Boolean).join(' ')}
                         onClick={() => {
-                          
                           setSheet(isSelected ? null : { sid: activeId, kind: 'cell', wd, block })
                         }}
                         aria-label={`${WEEKDAYS_LONG[wd]}, ${label} ч: ${eventsWord(count)}`}
@@ -1218,11 +1213,13 @@ export default function Analytics({ substances, entries, onEditEntry, onOpenHist
                       </button>
                     )
                   })}
-                  <div className="heat-total">{heat[wd].reduce((a, b) => a + b, 0)}</div>
+                  <div className="heat-total">{colTotals[block]}</div>
                 </Fragment>
               ))}
               <div className="heat-head">Σ</div>
-              {colTotals.map((count, b) => <div className="heat-total" key={b}>{count}</div>)}
+              {heat.map((dayValues, wd) => (
+                <div className="heat-total" key={WEEKDAYS[wd]}>{dayValues.reduce((a, b) => a + b, 0)}</div>
+              ))}
               <div className="heat-total">{current.events}</div>
             </div>
           )}
