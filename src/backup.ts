@@ -1,4 +1,6 @@
 import { formatDateLong, formatDateTime, formatTime } from './settings'
+import { normalizeAbsences, absenceKey, type Absence } from './absences'
+import { LIMIT_TYPES, normalizeLimits, type LimitsMap } from './limits'
 
 // Резервная копия DoseTrack: выгрузка и восстановление данных.
 // Всё происходит на устройстве: файл создаётся в браузере и никуда не отправляется.
@@ -36,10 +38,13 @@ export type StoredShape = {
   deletedCustomRoutes: string[]
   deletedCustomForms: string[]
   deletedCustomUnits: string[]
+  absences: Absence[]
+  limits: LimitsMap
 }
 
 const BACKUP_APP = 'DoseTrack'
-const BACKUP_FORMAT_VERSION = 1
+// 2: добавлены подтверждения отсутствия приёма и лимиты. Копии версии 1 читаются без изменений.
+const BACKUP_FORMAT_VERSION = 2
 
 // ───────────────────────── Выгрузка ─────────────────────────
 
@@ -89,36 +94,55 @@ export function buildReadableText(data: StoredShape): string {
     `Записей: ${sorted.length}`,
     '',
     'Отсутствие записи не означает отсутствие приёма.',
+    'Строки «Подтверждено отсутствие приёма» — дни, которые ты отметил(а) сам(а). Дни без записей и без такой строки — нет сведений.',
     '',
   ]
 
-  let currentDay = ''
+  const absencesByDay = new Map<string, Absence[]>()
+  for (const absence of data.absences) {
+    const list = absencesByDay.get(absence.date) ?? []
+    list.push(absence)
+    absencesByDay.set(absence.date, list)
+  }
+  const entriesByDay = new Map<string, BEntry[]>()
   for (const entry of sorted) {
-    const date = new Date(entry.takenAt)
-    const key = dayKey(date)
-    if (key !== currentDay) {
-      currentDay = key
-      lines.push(
-        '',
-        formatDateLong(date),
-        '—'.repeat(24),
-      )
+    const key = dayKey(new Date(entry.takenAt))
+    const list = entriesByDay.get(key) ?? []
+    list.push(entry)
+    entriesByDay.set(key, list)
+  }
+  const days = [...new Set([...entriesByDay.keys(), ...absencesByDay.keys()])].sort().reverse()
+
+  for (const key of days) {
+    const [y, m, d] = key.split('-').map(Number)
+    lines.push('', formatDateLong(new Date(y, m - 1, d)), '—'.repeat(24))
+
+    const dayAbsences = absencesByDay.get(key) ?? []
+    const global = dayAbsences.some(item => item.scope === 'all')
+    if (global) lines.push('Подтверждено отсутствие приёма: все вещества')
+    for (const item of dayAbsences) {
+      if (item.scope === 'all') continue
+      const substance = nameById.get(item.substanceId)
+      lines.push(`Подтверждено отсутствие приёма: ${substance?.name ?? 'Без названия'}${substance?.archived ? ' (в архиве)' : ''}`)
     }
 
-    const substance = nameById.get(entry.substanceId)
-    const name = substance?.name ?? entry.substanceName ?? 'Без названия'
-    const archived = substance?.archived ? ' (в архиве)' : ''
+    for (const entry of entriesByDay.get(key) ?? []) {
+      const date = new Date(entry.takenAt)
+      const substance = nameById.get(entry.substanceId)
+      const name = substance?.name ?? entry.substanceName ?? 'Без названия'
+      const archived = substance?.archived ? ' (в архиве)' : ''
 
-    let quantity: string
-    if (entry.unknown || entry.amount === null) {
-      quantity = 'количество неизвестно'
-    } else {
-      quantity = `${entry.approximate ? '≈ ' : ''}${formatNumber(entry.amount)} ${entry.unit}`
+      let quantity: string
+      if (entry.unknown || entry.amount === null) {
+        quantity = 'количество неизвестно'
+      } else {
+        quantity = `${entry.approximate ? '≈ ' : ''}${formatNumber(entry.amount)} ${entry.unit}`
+      }
+
+      const details = [quantity, entry.route, entry.form].filter(Boolean).join(' · ')
+      lines.push(`${formatTime(date)}  ${name}${archived} — ${details}`)
+      if (entry.comment) lines.push(`       Комментарий: ${entry.comment.replace(/\s*\n\s*/g, ' ')}`)
     }
-
-    const details = [quantity, entry.route, entry.form].filter(Boolean).join(' · ')
-    lines.push(`${formatTime(date)}  ${name}${archived} — ${details}`)
-    if (entry.comment) lines.push(`       Комментарий: ${entry.comment.replace(/\s*\n\s*/g, ' ')}`)
   }
 
   return lines.join('\n').replace(/^\n+/, '') + '\n'
@@ -241,6 +265,9 @@ export type MergeResult = {
   addedEntries: number
   skippedEntries: number
   addedSubstances: number
+  addedAbsences: number
+  skippedAbsences: number
+  addedLimits: number
 }
 
 const normName = (value: string) => value.toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim()
@@ -312,6 +339,41 @@ export function mergeBackup(current: StoredShape, backup: Raw): MergeResult {
     newEntries.push({ ...entry, substanceId })
   }
 
+  // Подтверждения отсутствия: дубликатов (та же дата и то же вещество) не создаём, существующие не меняем.
+  const absenceKeys = new Set(current.absences.map(item => absenceKey(item.date, item.substanceId)))
+  const absenceIds = new Set(current.absences.map(item => item.id))
+  const newAbsences: Absence[] = []
+  let skippedAbsences = 0
+  const fakeId = () => `abs-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+  const incoming = normalizeAbsences(backup.absences, id => idMap.get(id) ?? id, fakeId)
+  for (const item of incoming) {
+    if (!knownIds.has(item.substanceId)) continue
+    const key = absenceKey(item.date, item.substanceId)
+    if (absenceKeys.has(key)) {
+      skippedAbsences += 1
+      continue
+    }
+    absenceKeys.add(key)
+    const id = absenceIds.has(item.id) ? fakeId() : item.id
+    absenceIds.add(id)
+    newAbsences.push({ ...item, id })
+  }
+
+  // Лимиты: существующие значения имеют приоритет, добавляются только ещё не заданные.
+  const mergedLimits: LimitsMap = {}
+  for (const [id, value] of Object.entries(current.limits)) mergedLimits[id] = { ...value }
+  let addedLimits = 0
+  const incomingLimits = normalizeLimits(backup.limits, id => idMap.get(id) ?? id)
+  for (const [id, value] of Object.entries(incomingLimits)) {
+    if (!knownIds.has(id)) continue
+    for (const type of LIMIT_TYPES) {
+      const item = value[type]
+      if (!item || mergedLimits[id]?.[type]) continue
+      mergedLimits[id] = { ...(mergedLimits[id] ?? {}), [type]: item }
+      addedLimits += 1
+    }
+  }
+
   const customSubstancesAdded = newSubstances.filter(item => item.source === 'custom').length
 
   const lastChoices = { ...(backup.lastChoices && typeof backup.lastChoices === 'object' ? backup.lastChoices : {}), ...current.lastChoices }
@@ -331,10 +393,15 @@ export function mergeBackup(current: StoredShape, backup: Raw): MergeResult {
       deletedCustomRoutes: union(current.deletedCustomRoutes, backup.deletedCustomRoutes),
       deletedCustomForms: union(current.deletedCustomForms, backup.deletedCustomForms),
       deletedCustomUnits: union(current.deletedCustomUnits, backup.deletedCustomUnits),
+      absences: [...current.absences, ...newAbsences],
+      limits: mergedLimits,
     },
     totalInFile: backupEntries.length,
     addedEntries: newEntries.length,
     skippedEntries: skipped,
     addedSubstances: customSubstancesAdded,
+    addedAbsences: newAbsences.length,
+    skippedAbsences,
+    addedLimits,
   }
 }

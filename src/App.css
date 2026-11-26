@@ -1954,3 +1954,99 @@ p.about-tagline.about-tagline-key { color: var(--accent); font-weight: 700; }
 }
 .support-address a { color: var(--accent); text-decoration: none; }
 .settings-body .copy-status { display: block; min-height: 18px; margin-top: 8px; color: #e6a2a2; font-size: 12px; }
+
+/* ===== Лимиты, подтверждения отсутствия приёма, напоминание о копии ===== */
+:root {
+  --limit-near: rgb(232, 160, 64);
+  --limit-over: rgb(214, 84, 84);
+}
+
+.chart-readout { white-space: pre-line; }
+
+.limits-open { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; margin-top: 4px; text-align: left; }
+.limits-open-note { font-size: 11px; }
+
+.limit-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 10px 0 0; font-size: 12px; }
+.limit-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.limit-swatch { display: inline-block; width: 14px; height: 14px; border-radius: 4px; }
+.limit-swatch.near { background: var(--limit-near); }
+.limit-swatch.over { background: var(--limit-over); }
+.limit-tag { margin-left: 8px; padding: 1px 7px; border-radius: 999px; font-size: 10px; font-weight: 700; color: #1b1308; }
+.limit-tag.near { background: var(--limit-near); }
+.limit-tag.over { background: var(--limit-over); color: #fff; }
+
+.bar-chart .axis-limit-mark { pointer-events: none; }
+
+/* Календарь аналитики */
+.calendar-empty { position: relative; }
+.calendar-day.day-near { box-shadow: inset 0 0 0 2px var(--limit-near); }
+.calendar-day.day-over { box-shadow: inset 0 0 0 2px var(--limit-over); }
+.calendar-day.week-near::before,
+.calendar-day.week-over::before,
+.calendar-empty.week-near::before,
+.calendar-empty.week-over::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+}
+.calendar-day.week-near::before, .calendar-empty.week-near::before { background: rgba(232, 160, 64, .28); }
+.calendar-day.week-over::before, .calendar-empty.week-over::before { background: rgba(214, 84, 84, .3); }
+.cal-event-over {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--limit-over);
+}
+.cal-event-over.static { position: static; display: inline-block; }
+.calendar-day.confirmed-absence {
+  background: transparent;
+  border: 1px dashed var(--muted);
+}
+.calendar-day.absence-conflict { border: 1px dashed var(--limit-over); }
+.legend-absence { display: inline-block; width: 12px; height: 12px; border: 1px dashed var(--muted); border-radius: 3px; vertical-align: -2px; }
+.calendar-day.pick-selected { background: var(--accent); color: var(--accent-dark); font-weight: 700; }
+.calendar-day:disabled { opacity: .3; cursor: not-allowed; }
+
+/* Панель деталей */
+.sheet-absence, .sheet-limits, .sheet-conflict {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.sheet-absence { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-style: dashed; font-size: 13px; }
+.sheet-conflict { border-color: var(--limit-over); }
+.sheet-conflict-actions { display: flex; flex-direction: column; gap: 6px; }
+.sheet-limits { display: flex; flex-direction: column; gap: 4px; }
+
+/* Диалоги */
+.dialog-wide { width: min(100%, 460px); }
+.dialog-heading { margin: 0 0 10px; font-size: 17px; }
+.dialog-stack { display: flex; flex-direction: column; gap: 8px; }
+.dialog-btn:disabled { opacity: .45; cursor: not-allowed; }
+.limit-row { display: flex; flex-direction: column; gap: 4px; margin: 14px 0; }
+.limit-inputs { display: flex; align-items: center; gap: 8px; }
+.limit-inputs .dialog-input { margin: 0; width: auto; flex: 1; min-width: 0; }
+.absence-scope { display: flex; flex-direction: column; gap: 6px; max-height: 190px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.absence-picked { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 14px; }
+.conflict-block { margin: 10px 0; padding: 10px; border: 1px solid var(--line); border-radius: 10px; font-size: 13px; }
+.conflict-list { margin: 6px 0; padding-left: 18px; }
+.absence-entry { margin-top: 14px; }
+
+/* Напоминание о резервной копии */
+.backup-reminder {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.backup-reminder p { margin: 0 0 8px; }
+.backup-reminder-actions { display: flex; align-items: center; gap: 14px; }

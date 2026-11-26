@@ -3,9 +3,14 @@ import './App.css'
 import { builtinSubstanceDefinitions } from './substancesCatalog'
 import Analytics, { type HistoryJump } from './Analytics'
 import { useDialogs } from './dialogContext'
+import { absenceKey, dayKeyOfDate, normalizeAbsences, type Absence } from './absences'
+import { normalizeLimits, type LimitsMap, type SubstanceLimits } from './limits'
+import { markBackupOpened } from './service'
+import AbsenceDialog, { EntryConflictDialog, type AbsencePlan } from './AbsenceDialog'
+import BackupReminder from './BackupReminder'
 import SettingsScreen from './SettingsScreen'
 import FirstRunNotice from './FirstRunNotice'
-import { formatDateTime, useSettings } from './settings'
+import { formatDateLong, formatDateTime, formatTime, useSettings } from './settings'
 import {
   buildBackupJson,
   buildReadableText,
@@ -242,6 +247,8 @@ function loadStoredData(source?: Raw): {
   deletedCustomRoutes: string[]
   deletedCustomForms: string[]
   deletedCustomUnits: string[]
+  absences: Absence[]
+  limits: LimitsMap
 } {
   let saved: string | null = null
   try {
@@ -401,6 +408,9 @@ function loadStoredData(source?: Raw): {
       deletedCustomRoutes,
       deletedCustomForms,
       deletedCustomUnits,
+      // Старые данные без этих полей — не ошибка: подставляются пустые значения.
+      absences: normalizeAbsences(parsed?.absences, canonicalizeSubstanceId, makeId),
+      limits: normalizeLimits(parsed?.limits, canonicalizeSubstanceId),
     }
   } catch (error) {
     console.error('DoseTrack: не удалось прочитать сохранённые данные', error)
@@ -421,6 +431,8 @@ function loadStoredData(source?: Raw): {
       deletedCustomRoutes: [],
       deletedCustomForms: [],
       deletedCustomUnits: [],
+      absences: [],
+      limits: {},
     }
   }
 }
@@ -520,6 +532,16 @@ function App() {
   const [deletedCustomRoutes, setDeletedCustomRoutes] = useState<string[]>(initialData.deletedCustomRoutes)
   const [deletedCustomForms, setDeletedCustomForms] = useState<string[]>(initialData.deletedCustomForms)
   const [deletedCustomUnits, setDeletedCustomUnits] = useState<string[]>(initialData.deletedCustomUnits)
+  const [absences, setAbsences] = useState<Absence[]>(initialData.absences)
+  const [limits, setLimits] = useState<LimitsMap>(initialData.limits)
+  const [absenceOpen, setAbsenceOpen] = useState(false)
+  const [entryConflict, setEntryConflict] = useState<{
+    ids: string[]
+    substanceName: string
+    dayLabel: string
+    preview: string
+    commit: (removeAbsenceIds: string[]) => void
+  } | null>(null)
 
   const [tab, setTab] = useState<Tab>('record')
   const [backupStatus, setBackupStatus] = useState('')
@@ -603,13 +625,13 @@ function App() {
     try {
       localStorage.setItem(
         STORAGE_KEY,
-        JSON.stringify({ substances, entries, customRoutes, customForms, lastChoices, customUnits, lastUnitChoices, deletedCustomRoutes, deletedCustomForms, deletedCustomUnits }),
+        JSON.stringify({ substances, entries, customRoutes, customForms, lastChoices, customUnits, lastUnitChoices, deletedCustomRoutes, deletedCustomForms, deletedCustomUnits, absences, limits }),
       )
     } catch (error) {
       // Переполнение хранилища или запрет доступа не должны ломать интерфейс.
       console.error('DoseTrack: не удалось сохранить данные', error)
     }
-  }, [substances, entries, customRoutes, customForms, lastChoices, customUnits, lastUnitChoices, deletedCustomRoutes, deletedCustomForms, deletedCustomUnits])
+  }, [substances, entries, customRoutes, customForms, lastChoices, customUnits, lastUnitChoices, deletedCustomRoutes, deletedCustomForms, deletedCustomUnits, absences, limits])
 
 
   useEffect(() => {
@@ -891,10 +913,11 @@ function App() {
     }
 
     if (!(await showConfirm(
-      `Удалить всю историю приёма «${substance.name}» (${count} ${count === 1 ? 'запись' : 'записей'})? Само вещество останется в списке. Это действие нельзя отменить.`,
+      `Удалить всю историю приёма «${substance.name}» (${count} ${count === 1 ? 'запись' : 'записей'})? Отметки отсутствия приёма по этому веществу тоже будут удалены. Само вещество и его лимиты останутся. Это действие нельзя отменить.`,
     ))) return
 
     setEntries(previous => previous.filter(entry => entry.substanceId !== id))
+    setAbsences(previous => previous.filter(item => item.substanceId !== id))
     if (entries.some(entry => entry.id === editingEntryId && entry.substanceId === id)) {
       resetForm()
       setTab('history')
@@ -916,6 +939,12 @@ function App() {
 
     setSubstances(previous => previous.filter(item => item.id !== id))
     setEntries(previous => previous.filter(entry => entry.substanceId !== id))
+    setAbsences(previous => previous.filter(item => item.substanceId !== id))
+    setLimits(previous => {
+      const next = { ...previous }
+      delete next[id]
+      return next
+    })
     setLastChoices(previous => {
       const next = { ...previous }
       delete next[id]
@@ -1053,6 +1082,11 @@ function App() {
       return
     }
 
+    const entryDay = dayKeyOfDate(new Date(takenAt))
+    const commit = (removeAbsenceIds: string[]) => {
+    if (removeAbsenceIds.length > 0) {
+      setAbsences(previous => previous.filter(item => !removeAbsenceIds.includes(item.id)))
+    }
     setLastChoices(previous => ({
       ...previous,
       [targetId]: {
@@ -1103,6 +1137,21 @@ function App() {
 
     resetForm()
     setTab('history')
+    }
+
+    // Запись на дату, для которой подтверждено отсутствие приёма этого вещества: противоречие, решает пользователь.
+    const clashing = absences.filter(item => item.substanceId === targetId && item.date === entryDay)
+    if (clashing.length > 0) {
+      setEntryConflict({
+        ids: clashing.map(item => item.id),
+        substanceName: substance.name,
+        dayLabel: formatDateLong(new Date(takenAt)),
+        preview: `${formatTime(new Date(takenAt))} · ${substance.name} · ${unknown ? 'количество неизвестно' : `${approximate ? '≈ ' : ''}${amount.trim().replace('.', ',')} ${unit}`}`,
+        commit,
+      })
+      return
+    }
+    commit([])
   }
 
   async function deleteEntry(id: string) {
@@ -1139,6 +1188,8 @@ function App() {
       deletedCustomRoutes,
       deletedCustomForms,
       deletedCustomUnits,
+      absences,
+      limits,
     }
   }
 
@@ -1173,16 +1224,33 @@ function App() {
     }
 
     const result = mergeBackup(currentStored(), parsed.data)
-    if (result.addedEntries === 0 && result.addedSubstances === 0) {
-      await showAlert(`Все записи из копии (${result.totalInFile}) уже есть в журнале. Ничего не добавлено.`)
+    if (result.addedEntries === 0 && result.addedSubstances === 0 && result.addedAbsences === 0 && result.addedLimits === 0) {
+      await showAlert(`Все данные из копии (записей: ${result.totalInFile}) уже есть в журнале. Ничего не добавлено.`)
       return
     }
 
     const substanceNote = result.addedSubstances > 0
       ? ` Будет добавлено пользовательских веществ: ${result.addedSubstances}.`
       : ''
+    const absenceNote = result.addedAbsences > 0 || result.skippedAbsences > 0
+      ? ` Отметок отсутствия приёма: новых ${result.addedAbsences}, уже есть ${result.skippedAbsences}.`
+      : ''
+    const limitNote = result.addedLimits > 0
+      ? ` Будет добавлено лимитов: ${result.addedLimits} (уже заданные не меняются).`
+      : ''
+    // Объединение не удаляет и не меняет данные сам, но дни с записью и отметкой одновременно покажем сразу.
+    const mergedEntries = loadStoredData(result.merged)
+    const clashes = new Set<string>()
+    for (const item of mergedEntries.absences) {
+      if (mergedEntries.entries.some(entry => entry.substanceId === item.substanceId && dayKeyOfDate(new Date(entry.takenAt)) === item.date)) {
+        clashes.add(absenceKey(item.date, item.substanceId))
+      }
+    }
+    const clashNote = clashes.size > 0
+      ? ` Внимание: в ${clashes.size} случаях в один день есть и записи, и отметка «приёма не было». Ничего не удалится; такие дни помечены в календаре аналитики, там можно выбрать, какие сведения оставить.`
+      : ''
     const ok = await showConfirm(
-      `В копии записей: ${result.totalInFile}. Новых для этого журнала: ${result.addedEntries}, уже есть: ${result.skippedEntries}.${substanceNote} Текущие записи не изменятся и не удалятся. Добавить?`,
+      `В копии записей: ${result.totalInFile}. Новых для этого журнала: ${result.addedEntries}, уже есть: ${result.skippedEntries}.${substanceNote}${absenceNote}${limitNote}${clashNote} Текущие записи не изменятся и не удалятся. Добавить?`,
     )
     if (!ok) return
 
@@ -1196,7 +1264,7 @@ function App() {
 
     const next = loadStoredData(result.merged)
     // Проверка: после слияния записей должно быть ровно столько, сколько ожидалось.
-    if (next.entries.length !== entries.length + result.addedEntries) {
+    if (next.entries.length !== entries.length + result.addedEntries || next.absences.length !== absences.length + result.addedAbsences) {
       await showAlert('Не удалось безопасно восстановить данные. Журнал не изменён.')
       return
     }
@@ -1211,19 +1279,76 @@ function App() {
     setDeletedCustomRoutes(next.deletedCustomRoutes)
     setDeletedCustomForms(next.deletedCustomForms)
     setDeletedCustomUnits(next.deletedCustomUnits)
+    setAbsences(next.absences)
+    setLimits(next.limits)
     setImportText('')
     setBackupStatus('')
     setHistoryTool(null)
-    await showAlert(`Готово. Добавлено записей: ${result.addedEntries}.`)
+    await showAlert(`Готово. Добавлено записей: ${result.addedEntries}${result.addedAbsences > 0 ? `, отметок отсутствия приёма: ${result.addedAbsences}` : ''}${result.addedLimits > 0 ? `, лимитов: ${result.addedLimits}` : ''}.`)
+  }
+
+  // ── Отсутствие приёма и лимиты ──────────────────────────────────
+  function applyAbsencePlan(plan: AbsencePlan) {
+    const now = new Date().toISOString()
+    const taken = new Set(absences.map(item => absenceKey(item.date, item.substanceId)))
+    const created: Absence[] = []
+    for (const record of plan.records) {
+      const key = absenceKey(record.date, record.substanceId)
+      if (taken.has(key)) continue // повторная отметка не создаётся и не меняет существующую
+      taken.add(key)
+      created.push({ id: makeId(), date: record.date, substanceId: record.substanceId, scope: plan.scope, createdAt: now })
+    }
+    const deleteIds = new Set(plan.deleteEntryIds)
+    if (deleteIds.size > 0) {
+      setEntries(previous => previous.filter(entry => !deleteIds.has(entry.id)))
+      if (editingEntryId && deleteIds.has(editingEntryId)) resetForm()
+    }
+    setAbsences(previous => [...previous, ...created])
+    setAbsenceOpen(false)
+    void showAlert(
+      `Готово. Создано отметок: ${created.length}.${deleteIds.size > 0 ? ` Удалено записей: ${deleteIds.size}.` : ''}`,
+    )
+  }
+
+  async function cancelAbsence(id: string) {
+    if (!(await showConfirm('Отменить отметку отсутствия приёма? Записи журнала и другие отметки не изменятся.'))) return
+    setAbsences(previous => previous.filter(item => item.id !== id))
+  }
+
+  async function resolveDayConflict(sid: string, day: string, keep: 'entries' | 'absence') {
+    if (keep === 'entries') {
+      if (!(await showConfirm('Убрать отметку «приёма не было» за этот день и оставить записи? Записи не изменятся.'))) return
+      setAbsences(previous => previous.filter(item => !(item.substanceId === sid && item.date === day)))
+      return
+    }
+    const ids = entries
+      .filter(entry => entry.substanceId === sid && dayKeyOfDate(new Date(entry.takenAt)) === day)
+      .map(entry => entry.id)
+    if (ids.length === 0) return
+    if (!(await showConfirm(`Оставить отметку и удалить записи за этот день: ${ids.length}? Это действие нельзя отменить.`))) return
+    setEntries(previous => previous.filter(entry => !ids.includes(entry.id)))
+    if (editingEntryId && ids.includes(editingEntryId)) resetForm()
+  }
+
+  function setSubstanceLimits(sid: string, next: SubstanceLimits) {
+    setLimits(previous => {
+      const copy = { ...previous }
+      if (Object.keys(next).length === 0) delete copy[sid]
+      else copy[sid] = next
+      return copy
+    })
   }
 
   function openHistoryTool(tool: HistoryTool) {
+    // Сам факт нажатия кнопки открытия раздела резервной копии — обращение; дальнейшие действия не проверяются.
+    if (tool === 'export') markBackupOpened()
     setBackupStatus('')
     setHistoryTool(tool)
   }
 
   function clearAllHistory() {
     setEntries([])
+    setAbsences([])
     if (editingEntryId) resetForm()
     // Страховочная копия, созданная при загрузке, тоже содержит историю — удаляем и её.
     try {
@@ -1766,6 +1891,15 @@ function App() {
             Можно внести событие задним числом.
           </p>
         </form>
+
+        <section className="panel absence-entry">
+          <p className="muted small">
+            Если в какой-то день приёма не было, это можно отметить отдельно. Отметка необязательна и не является записью о приёме.
+          </p>
+          <button type="button" className="secondary-button" onClick={() => setAbsenceOpen(true)}>
+            Отсутствие приёма
+          </button>
+        </section>
       </>
     )
   }
@@ -2185,7 +2319,7 @@ function App() {
             <>
               <h2>Удаление всей истории</h2>
               <p className="tool-choice tool-choice-danger">Ты выбрал(а): удалить ВСЮ историю.</p>
-              {entries.length === 0 ? (
+              {entries.length === 0 && absences.length === 0 ? (
                 <>
                   <p className="muted small">В журнале пока нет записей, удалять нечего.</p>
                   <div className="dialog-actions">
@@ -2195,8 +2329,9 @@ function App() {
               ) : (
                 <>
                   <p className="dialog-message">
-                    Будут безвозвратно удалены все записи: {entries.length} (по всем веществам, включая архив).
-                    Сами вещества, твои способы, формы и единицы останутся. Отменить удаление нельзя.
+                    Будут безвозвратно удалены все записи: {entries.length} (по всем веществам, включая архив)
+                    и все отметки отсутствия приёма: {absences.length}.
+                    Сами вещества, твои способы, формы, единицы и настройки лимитов останутся. Отменить удаление нельзя.
                   </p>
                   <p className="muted small">Если записи могут понадобиться, сначала сохрани резервную копию.</p>
                   <div className="dialog-actions tool-actions-wrap">
@@ -2225,6 +2360,12 @@ function App() {
         <Analytics
           substances={activeSubstances}
           entries={visibleEntries}
+          absences={absences}
+          limits={limits}
+          unitChoices={[...unitOptions, ...customUnits.filter(option => !unitOptions.includes(option) && !deletedCustomUnits.includes(option))]}
+          onSetLimits={setSubstanceLimits}
+          onCancelAbsence={cancelAbsence}
+          onResolveConflict={resolveDayConflict}
           onEditEntry={editEntryById}
           onOpenHistory={openHistoryFor}
         />
@@ -2232,7 +2373,9 @@ function App() {
         <p className="hint">
           Отсутствие записи не означает отсутствие приёма.
           Неизвестные дни не считаются днями без употребления.
-          Разные единицы измерения не суммируются.
+          Мкг, мг и г суммируются вместе, остальные единицы считаются отдельно.
+          Лимиты — только числа, которые задал ты сам(а).
+          Записи с неизвестным количеством в лимитах не учитываются.
           Приблизительные количества включаются в суммы
           и отмечаются знаком ≈.
         </p>
@@ -2262,6 +2405,11 @@ function App() {
           </button>
         </div>
       </header>
+
+      <BackupReminder
+        hasData={entries.length > 0 || absences.length > 0}
+        onOpenBackup={() => openHistoryTool('export')}
+      />
 
       <main>
         {tab === 'record' && renderRecord()}
@@ -2298,6 +2446,34 @@ function App() {
       </nav>
 
       {renderHistoryTool()}
+      {absenceOpen && (
+        <AbsenceDialog
+          substances={substances}
+          entries={entries}
+          absences={absences}
+          onApply={applyAbsencePlan}
+          onClose={() => setAbsenceOpen(false)}
+        />
+      )}
+      {entryConflict && (
+        <EntryConflictDialog
+          substanceName={entryConflict.substanceName}
+          dayLabel={entryConflict.dayLabel}
+          entryText={entryConflict.preview}
+          onSaveEntry={() => {
+            const conflict = entryConflict
+            setEntryConflict(null)
+            conflict.commit(conflict.ids)
+          }}
+          onKeepAbsence={() => {
+            setEntryConflict(null)
+            const wasEditing = editingEntryId !== null
+            resetForm()
+            if (wasEditing) setTab('history')
+          }}
+          onBack={() => setEntryConflict(null)}
+        />
+      )}
       {settingsOpen && <SettingsScreen onClose={() => setSettingsOpen(false)} />}
       <FirstRunNotice />
     </div>
